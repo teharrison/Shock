@@ -4,6 +4,12 @@
 common
 common/**/*
 
+shock-server/shock-server
+devel/lo.data
+
+prod/*.yaml
+prod/*.conf
+
 # ignore files with # and ~
 *\#*
 *\~*
@@ -25,8 +31,23 @@ _obj
 pkg
 bin
 
+.vscode/
+
+
 # os x files
 *.DS_Store
 
 # Thumbnails
 ._*
+38603502-c1dd-4a4a-b4df-53769bf0180e.data
+shock-server/ff922507-7046-4a12-8490-89578695c1fd.data
+shock-server/lo
+lo
+shock.code-workspace
+
+
+.swagger-codegen-ignore
+.swagger-codegen/
+devel/lo.data
+shock-server/shock-server
+shock-server/shock-server

@@ -2,25 +2,6 @@ package main
 
 import (
 	"fmt"
-	"github.com/MG-RAST/Shock/shock-server/auth"
-	"github.com/MG-RAST/Shock/shock-server/conf"
-	ncon "github.com/MG-RAST/Shock/shock-server/controller/node"
-	acon "github.com/MG-RAST/Shock/shock-server/controller/node/acl"
-	icon "github.com/MG-RAST/Shock/shock-server/controller/node/index"
-	pcon "github.com/MG-RAST/Shock/shock-server/controller/preauth"
-	"github.com/MG-RAST/Shock/shock-server/db"
-	e "github.com/MG-RAST/Shock/shock-server/errors"
-	"github.com/MG-RAST/Shock/shock-server/logger"
-	"github.com/MG-RAST/Shock/shock-server/node"
-	"github.com/MG-RAST/Shock/shock-server/node/locker"
-	"github.com/MG-RAST/Shock/shock-server/preauth"
-	"github.com/MG-RAST/Shock/shock-server/request"
-	"github.com/MG-RAST/Shock/shock-server/responder"
-	"github.com/MG-RAST/Shock/shock-server/user"
-	"github.com/MG-RAST/Shock/shock-server/util"
-	"github.com/MG-RAST/Shock/shock-server/versions"
-	"github.com/MG-RAST/golib/stretchr/goweb"
-	"github.com/MG-RAST/golib/stretchr/goweb/context"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -30,6 +11,29 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MG-RAST/Shock/shock-server/auth"
+	"github.com/MG-RAST/Shock/shock-server/cache"
+	"github.com/MG-RAST/Shock/shock-server/conf"
+	ncon "github.com/MG-RAST/Shock/shock-server/controller/node"
+	acon "github.com/MG-RAST/Shock/shock-server/controller/node/acl"
+	icon "github.com/MG-RAST/Shock/shock-server/controller/node/index"
+	pcon "github.com/MG-RAST/Shock/shock-server/controller/preauth"
+	"github.com/MG-RAST/Shock/shock-server/db"
+	e "github.com/MG-RAST/Shock/shock-server/errors"
+	"github.com/MG-RAST/Shock/shock-server/location"
+	"github.com/MG-RAST/Shock/shock-server/logger"
+	"github.com/MG-RAST/Shock/shock-server/node"
+	"github.com/MG-RAST/Shock/shock-server/node/locker"
+	"github.com/MG-RAST/Shock/shock-server/preauth"
+	"github.com/MG-RAST/Shock/shock-server/request"
+	"github.com/MG-RAST/Shock/shock-server/responder"
+	"github.com/MG-RAST/Shock/shock-server/types"
+	"github.com/MG-RAST/Shock/shock-server/user"
+	"github.com/MG-RAST/Shock/shock-server/util"
+	"github.com/MG-RAST/Shock/shock-server/versions"
+	"github.com/MG-RAST/golib/stretchr/goweb"
+	"github.com/MG-RAST/golib/stretchr/goweb/context"
 )
 
 const (
@@ -43,18 +47,20 @@ type anonymous struct {
 }
 
 type resource struct {
-	A []string  `json:"attribute_indexes"`
-	C string    `json:"contact"`
-	D string    `json:"documentation"`
-	I string    `json:"id"`
-	O []string  `json:"auth"`
-	P anonymous `json:"anonymous_permissions"`
-	R []string  `json:"resources"`
-	S string    `json:"server_time"`
-	T string    `json:"type"`
-	U string    `json:"url"`
-	V string    `json:"version"`
+	A      []string  `json:"attribute_indexes"`
+	C      string    `json:"contact"`
+	I      string    `json:"id"`
+	O      []string  `json:"auth"`
+	P      anonymous `json:"anonymous_permissions"`
+	R      []string  `json:"resources"`
+	S      string    `json:"server_time"`
+	T      string    `json:"type"`
+	U      string    `json:"url"`
+	Uptime string    `json:"uptime"`
+	V      string    `json:"version"`
 }
+
+var StartTime = time.Now()
 
 func mapRoutes() {
 	goweb.MapBefore(func(ctx context.Context) error {
@@ -123,6 +129,54 @@ func mapRoutes() {
 		return nil
 	})
 
+	goweb.Map("/node/{nid}/locations/", func(ctx context.Context) error {
+		if ctx.HttpRequest().Method == "OPTIONS" {
+			return responder.RespondOK(ctx)
+		}
+		node.LocationsRequest(ctx)
+		return nil
+	})
+
+	goweb.Map("/node/{nid}/locations/{loc}", func(ctx context.Context) error {
+		if ctx.HttpRequest().Method == "OPTIONS" {
+			return responder.RespondOK(ctx)
+		}
+		node.LocationsRequest(ctx)
+		return nil
+	})
+
+	goweb.Map("/node/{nid}/restore/", func(ctx context.Context) error {
+		if ctx.HttpRequest().Method == "OPTIONS" {
+			return responder.RespondOK(ctx)
+		}
+		node.RestoreRequest(ctx)
+		return nil
+	})
+
+	goweb.Map("/node/{nid}/restore/{val}", func(ctx context.Context) error {
+		if ctx.HttpRequest().Method == "OPTIONS" {
+			return responder.RespondOK(ctx)
+		}
+		node.RestoreRequest(ctx)
+		return nil
+	})
+
+	// goweb.Map("/location/{loc}", func(ctx context.Context) error {
+	// 	if ctx.HttpRequest().Method == "OPTIONS" {
+	// 		return responder.RespondOK(ctx)
+	// 	}
+	// 	LocationRequest(ctx)
+	// 	return nil
+	// })
+
+	goweb.Map("/location/{loc}/{function}", func(ctx context.Context) error {
+		if ctx.HttpRequest().Method == "OPTIONS" {
+			return responder.RespondOK(ctx)
+		}
+		location.LocRequest(ctx)
+		return nil
+	})
+
 	// view lock status
 	goweb.Map("/locker", func(ctx context.Context) error {
 		ids := locker.NodeLockMgr.GetAll()
@@ -172,6 +226,14 @@ func mapRoutes() {
 		return responder.RespondWithData(ctx, "trace stoped")
 	})
 
+	goweb.Map("/types/{type}/{function}/", func(ctx context.Context) error {
+		if ctx.HttpRequest().Method == "OPTIONS" {
+			return responder.RespondOK(ctx)
+		}
+		types.TypeRequest(ctx)
+		return nil
+	})
+
 	goweb.Map("/", func(ctx context.Context) error {
 		host := util.ApiUrl(ctx)
 
@@ -196,25 +258,23 @@ func mapRoutes() {
 		}
 
 		r := resource{
-			A: attrs,
-			C: conf.ADMIN_EMAIL,
-			D: host + "/wiki/",
-			I: "Shock",
-			O: auth,
-			P: *anonPerms,
-			R: []string{"node"},
-			S: time.Now().Format(longDateForm),
-			T: "Shock",
-			U: host + "/",
-			V: conf.VERSION,
+			A:      attrs,
+			C:      conf.ADMIN_EMAIL,
+			I:      "Shock",
+			O:      auth,
+			P:      *anonPerms,
+			R:      []string{"node"},
+			S:      time.Now().Format(longDateForm),
+			T:      "Shock",
+			U:      host + "/",
+			Uptime: time.Since(StartTime).String(),
+			V:      conf.VERSION,
 		}
 		return responder.WriteResponseObject(ctx, http.StatusOK, r)
 	})
 
 	nodeController := new(ncon.NodeController)
 	goweb.MapController(nodeController)
-
-	goweb.MapStatic("/wiki", conf.PATH_SITE)
 
 	// Map the favicon
 	//goweb.MapStaticFile("/favicon.ico", "static-files/favicon.ico")
@@ -266,11 +326,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	user.Initialize()
+	err = user.Initialize()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Err@user.Initialize: %s\n", err.Error())
+		logger.Error("Err@user.Initialize: " + err.Error())
+		os.Exit(1)
+	}
+
 	node.Initialize()
 	preauth.Initialize()
 	auth.Initialize()
+
 	node.InitReaper()
+
 	err = versions.Initialize()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Err@versions.Initialize: %s\n", err.Error())
@@ -293,6 +361,7 @@ func main() {
 	}
 	printLogo()
 	conf.Print()
+
 	if err := versions.Print(); err != nil {
 		fmt.Fprintf(os.Stderr, "Err@versions.Print: %s\n", err.Error())
 		logger.Error("Err@versions.Print: " + err.Error())

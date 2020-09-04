@@ -3,6 +3,9 @@ package auth
 
 import (
 	"errors"
+	"fmt"
+
+	"github.com/MG-RAST/Shock/shock-server/auth/basic"
 	"github.com/MG-RAST/Shock/shock-server/auth/globus"
 	"github.com/MG-RAST/Shock/shock-server/auth/oauth"
 	"github.com/MG-RAST/Shock/shock-server/conf"
@@ -15,6 +18,7 @@ import (
 var authCache cache
 var authMethods []func(string) (*user.User, error)
 
+// Initialize _
 func Initialize() {
 	authCache = cache{m: make(map[string]cacheValue)}
 	authMethods = []func(string) (*user.User, error){}
@@ -24,23 +28,43 @@ func Initialize() {
 	if conf.AUTH_GLOBUS_TOKEN_URL != "" && conf.AUTH_GLOBUS_PROFILE_URL != "" {
 		authMethods = append(authMethods, globus.Auth)
 	}
+
+	if conf.AUTH_BASIC {
+		authMethods = append(authMethods, basic.Auth)
+	}
 }
 
+// Authenticate _
 func Authenticate(header string) (u *user.User, err error) {
-	if u = authCache.lookup(header); u != nil {
-		return u, nil
-	} else {
-		for _, auth := range authMethods {
-			u, err := auth(header)
-			if u != nil && err == nil {
-				authCache.add(header, u)
-				return u, nil
+	u = authCache.lookup(header)
+	if u != nil {
+		return
+	}
+
+	for _, auth := range authMethods {
+		u, err = auth(header)
+		if err != nil {
+
+			if conf.DEBUG_AUTH && len(authMethods) == 1 {
+				err = fmt.Errorf("(Authenticate) authMethod returned: %s", err.Error())
+				return
 			}
-			if err != nil {
-				// log actual error, return consistant invalid auth to user
-				logger.Error("Err@auth.Authenticate: " + err.Error())
-			}
+
+			// log actual error, return consistant invalid auth to user
+			logger.Error("Err@auth.Authenticate: " + err.Error())
+			continue
 		}
+
+		if u != nil {
+			authCache.add(header, u)
+		}
+		return
+
+	}
+
+	if conf.DEBUG_AUTH {
+		err = fmt.Errorf("(Authenticate) No authMethod matched (count: %d)", len(authMethods))
+		return
 	}
 	return nil, errors.New(e.InvalidAuth)
 }

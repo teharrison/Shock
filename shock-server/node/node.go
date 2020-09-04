@@ -4,7 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/MG-RAST/Shock/shock-server/conf"
 	e "github.com/MG-RAST/Shock/shock-server/errors"
+	"github.com/MG-RAST/Shock/shock-server/logger"
 	"github.com/MG-RAST/Shock/shock-server/node/acl"
 	"github.com/MG-RAST/Shock/shock-server/node/archive"
 	"github.com/MG-RAST/Shock/shock-server/node/file"
@@ -13,11 +21,6 @@ import (
 	"github.com/MG-RAST/Shock/shock-server/user"
 	"github.com/MG-RAST/Shock/shock-server/util"
 	"gopkg.in/mgo.v2/bson"
-	"io/ioutil"
-	"os"
-	"strconv"
-	"strings"
-	"time"
 )
 
 type Node struct {
@@ -34,10 +37,19 @@ type Node struct {
 	Priority     int               `bson:"priority" json:"priority"`
 	CreatedOn    time.Time         `bson:"created_on" json:"created_on"`
 	LastModified time.Time         `bson:"last_modified" json:"last_modified"`
-	Expiration   time.Time         `bson:"expiration" json:"expiration"` // 0 means no expiration
+	Expiration   time.Time         `bson:"expiration" json:"expiration"` // 0 means no expiration of Node
 	Type         string            `bson:"type" json:"type"`
 	Subset       Subset            `bson:"subset" json:"-"`
 	Parts        *PartsList        `bson:"parts" json:"parts"`
+	Locations    []Location        `bson:"locations" json:"locations"` // see below
+	Restore      bool              `bson:"restore" json:"restore"`     // has a restore request been observed
+}
+
+// Location a data type to represent storage locations (defined in LocationConfig) and status of data in flight
+type Location struct {
+	ID            string     `bson:"id" json:"id"`                                           // name of the location, if present data is verified to exist in said location
+	Stored        bool       `bson:"stored,omitempty" json:"stored,omitempty"`               //
+	RequestedDate *time.Time `bson:"requestedDate,omitempty" json:"requestedDate,omitempty"` // what is the date the data item was send on its way
 }
 
 type linkage struct {
@@ -77,11 +89,24 @@ type SubsetNodeIdxInfo struct {
 	Format      string `bson:"format" json:"-"`
 }
 
-func New() (node *Node) {
+const (
+	longDateForm  = "2006-01-02T15:04:05-07:00"
+	shortDateForm = "2006-01-02"
+)
+
+func New(uuid string) (node *Node) {
 	node = new(Node)
 	node.Indexes = make(map[string]*IdxInfo)
 	node.File.Checksum = make(map[string]string)
-	node.setId()
+
+	if uuid == "" {
+		node.setId()
+	} else {
+
+		logger.Infof("(Node-->New) we need to check with the upstream node (UUID-Master) if UUID is available ")
+
+	}
+
 	return
 }
 
@@ -94,20 +119,63 @@ func (node *Node) DBInit() {
 
 func CreateNodeUpload(u *user.User, params map[string]string, files file.FormFiles) (node *Node, err error) {
 	// if copying node or creating subset node from parent, check if user has rights to the original node
-	if _, hasCopyData := params["copy_data"]; hasCopyData {
-		_, err = Load(params["copy_data"])
+
+	checkSumMD5, hasCheckSumMD5 := params["checksum-md5"] //TODO make checksum generic using strings.Split("-") ?
+	if hasCheckSumMD5 {
+		matchingNodes := Nodes{}
+
+		_, err = dbFind(bson.M{"file.checksum.md5": checkSumMD5, "type": "basic"}, &matchingNodes, "", nil) // TODO search in public and owner nodes only
+		if err != nil {
+			return nil, err
+		}
+
+		if len(matchingNodes) > 0 {
+			var matchingNode *Node
+			matchingNode = matchingNodes[0]
+
+			params["copy_data"] = matchingNode.Id
+			delete(params, "path")
+
+		} else {
+			// node not found, continue as usual
+		}
+	}
+
+	if copy_data_id, hasCopyData := params["copy_data"]; hasCopyData {
+		var copy_data_node *Node
+		copy_data_node, err = Load(copy_data_id)
 		if err != nil {
 			return
 		}
-	}
-	if _, hasParentNode := params["parent_node"]; hasParentNode {
-		_, err = Load(params["parent_node"])
-		if err != nil {
+
+		rights := copy_data_node.Acl.Check(u.Uuid)
+		if copy_data_node.Acl.Owner != u.Uuid && u.Admin == false && copy_data_node.Acl.Owner != "public" && rights["read"] == false {
+			logger.Error("err@CreateNodeUpload: (Authenticate) id=" + copy_data_id + ": " + e.UnAuth)
+			//responder.RespondWithError(ctx, http.StatusUnauthorized, e.UnAuth)
+			//err = request.AuthError(err, ctx)
+			err = fmt.Errorf("copy_data_node auth error")
 			return
 		}
 	}
 
-	node = New()
+	if parentNode_id, hasParentNode := params["parent_node"]; hasParentNode {
+		var parentNode *Node
+		parentNode, err = Load(parentNode_id)
+		if err != nil {
+			return
+		}
+
+		rights := parentNode.Acl.Check(u.Uuid)
+		if parentNode.Acl.Owner != u.Uuid && u.Admin == false && parentNode.Acl.Owner != "public" && rights["read"] == false {
+			logger.Error("err@CreateNodeUpload: (Authenticate) id=" + parentNode_id + ": " + e.UnAuth)
+			//responder.RespondWithError(ctx, http.StatusUnauthorized, e.UnAuth)
+			//err = request.AuthError(err, ctx)
+			err = fmt.Errorf("parentNode auth error")
+			return
+		}
+	}
+
+	node = New("")
 	node.Type = "basic"
 
 	node.Acl.SetOwner(u.Uuid)
@@ -148,18 +216,18 @@ func CreateNodesFromArchive(u *user.User, params map[string]string, files file.F
 	}
 
 	// get attributes
-	var atttributes interface{}
+	var attributes interface{}
 	if attrFile, ok := files["attributes"]; ok {
 		defer attrFile.Remove()
 		attr, err := ioutil.ReadFile(attrFile.Path)
 		if err != nil {
 			return nil, err
 		}
-		if err = json.Unmarshal(attr, &atttributes); err != nil {
+		if err = json.Unmarshal(attr, &attributes); err != nil {
 			return nil, err
 		}
 	} else if attrStr, ok := params["attributes_str"]; ok {
-		if err = json.Unmarshal([]byte(attrStr), &atttributes); err != nil {
+		if err = json.Unmarshal([]byte(attrStr), &attributes); err != nil {
 			return nil, err
 		}
 	}
@@ -180,10 +248,10 @@ func CreateNodesFromArchive(u *user.User, params map[string]string, files file.F
 		// create link
 		link := linkage{Type: "parent", Operation: aFormat, Ids: []string{archiveId}}
 		// create and populate node
-		node := New()
+		node := New("")
 		node.Type = "basic"
 		node.Linkages = append(node.Linkages, link)
-		node.Attributes = atttributes
+		node.Attributes = attributes
 
 		if preserveAcls {
 			// copy over acls from parent node
@@ -234,7 +302,7 @@ func (node *Node) FileReader() (reader file.ReaderAt, err error) {
 		}
 		return file.MultiReaderAt(readers...), nil
 	}
-	return os.Open(node.FilePath())
+	return FMOpen(node.FilePath())
 }
 
 func (node *Node) DynamicIndex(name string) (idx index.Index, err error) {
@@ -251,22 +319,20 @@ func (node *Node) DynamicIndex(name string) (idx index.Index, err error) {
 	return
 }
 
-func (node *Node) Delete() (err error) {
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+
+// DeleteFiles delete the files on disk while keeping information in Mongo
+// FMopen will stage back the files from external Locations if requested
+// data for nodes will subsequently be cached in PATH_CACHE not stored in PATH_DATA
+func (node *Node) deleteFiles() (err error) {
 	// lock node
 	err = locker.NodeLockMgr.LockNode(node.Id)
 	if err != nil {
 		return
 	}
 	defer locker.NodeLockMgr.Remove(node.Id)
-
-	// check to make sure this node isn't referenced by a vnode
-	virtualNodes := Nodes{}
-	if _, err = dbFind(bson.M{"file.virtual_parts": node.Id}, &virtualNodes, "", nil); err != nil {
-		return err
-	}
-	if len(virtualNodes) != 0 {
-		return errors.New(e.NodeReferenced)
-	}
 
 	// Check to see if this node has a data file and if it's referenced by another node.
 	// If it is, we will move the data file to the first node we find, and point all other nodes to that node's path
@@ -307,14 +373,142 @@ func (node *Node) Delete() (err error) {
 		}
 	}
 
-	err = dbDelete(bson.M{"id": node.Id})
-	if err != nil {
-		return
-	}
-	err = node.Rmdir()
+	// we shoudl really delete the index files as well
+	logger.Debug(1, "(Node->DeleteFiles) we still need to delete the index files!")
+	// IndexFilePath := fmt.Sprintf("%s/%s.idx", node.IndexPath(), indextype)
+	// if err = os.Remove(IndexFilePath); err != nil {
+	// 	return
+	// }
+
 	return
 }
 
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+
+// ExpireNode -- delete the node from Mongo and Disk
+func (node *Node) Delete() (deleted bool, err error) {
+	// lock node
+	err = locker.NodeLockMgr.LockNode(node.Id)
+	if err != nil {
+		return
+	}
+	defer locker.NodeLockMgr.Remove(node.Id)
+
+	// check to make sure this node isn't referenced by a vnode
+	virtualNodes := Nodes{}
+	if _, err = dbFind(bson.M{"file.virtual_parts": node.Id}, &virtualNodes, "", nil); err != nil {
+		return
+	}
+	if len(virtualNodes) != 0 {
+		err = errors.New(e.NodeReferenced)
+		return
+	}
+
+	// Check to see if this node has a data file and if it's referenced by another node.
+	// If it is, we will move the data file to the first node we find, and point all other nodes to that node's path
+	dataFilePath := fmt.Sprintf("%s/%s.data", getPath(node.Id), node.Id)
+	dataFileExists := true
+	if _, ferr := os.Stat(dataFilePath); os.IsNotExist(ferr) {
+		dataFileExists = false
+	}
+	newDataFilePath := ""
+	copiedNodes := Nodes{}
+	if _, err = dbFind(bson.M{"file.path": dataFilePath}, &copiedNodes, "", nil); err != nil {
+		return
+	}
+	if len(copiedNodes) != 0 && dataFileExists {
+		for index, copiedNode := range copiedNodes {
+			// lock copynode for save
+			err = locker.NodeLockMgr.LockNode(copiedNode.Id)
+			if err != nil {
+				err = errors.New("This node has a data file linked to another node which could not be locked during data file copy: " + err.Error())
+				return
+			}
+			defer locker.NodeLockMgr.UnlockNode(copiedNode.Id)
+
+			if index == 0 {
+				newDataFilePath = fmt.Sprintf("%s/%s.data", getPath(copiedNode.Id), copiedNode.Id)
+				if rerr := os.Rename(dataFilePath, newDataFilePath); rerr != nil {
+					if _, cerr := util.CopyFile(dataFilePath, newDataFilePath); cerr != nil {
+						err = errors.New("This node has a data file linked to another node and the data file could not be copied elsewhere to allow for node deletion.")
+						return
+					}
+				}
+				copiedNode.File.Path = ""
+				copiedNode.Save()
+			} else {
+				copiedNode.File.Path = newDataFilePath
+				copiedNode.Save()
+			}
+		}
+	}
+
+	err = dbDelete(bson.M{"id": node.Id})
+	if err != nil {
+		logger.Debug(2, "(Node->Delete) we failed to delete %s from Mongo database", node.Id, err.Error())
+		return
+	}
+	err = node.Rmdir()
+	if err != nil {
+		logger.Debug(2, "(Node->Delete) we failed to delete %s from disk", node.Id, err.Error())
+		return
+	}
+	deleted = true
+	return
+}
+
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+// ExpireNodeFiles -- remove files in DATA_PATH if present on >= conf.MIN_REPLICA_COUNT external Locations
+func (n *Node) ExpireNodeFiles() (deleted bool, err error) {
+
+	// lock node
+	err = locker.NodeLockMgr.LockNode(n.Id)
+	if err != nil {
+		return
+	}
+	defer locker.NodeLockMgr.Remove(n.Id)
+
+	// leave if we are not set up to remove NodeFiles
+	if conf.NODE_DATA_REMOVAL == false {
+		deleted = false
+		return
+	}
+
+LocationsLoop:
+	for _, loc := range n.Locations {
+		counter := 0 // we need at least N locations before we can erase data files on local disk
+		// delete only if other locations exist
+		locObj, ok := conf.LocationsMap[loc.ID]
+		if !ok {
+			logger.Errorf("(Reaper-->FileReaper) location %s is not defined in this server instance \n ", loc)
+			continue LocationsLoop
+		}
+		//fmt.Printf("(Reaper-->FileReaper) locObj.Persistent =  %b  \n ", locObj.Persistent)
+		if locObj.Persistent == true {
+			logger.Debug(2, "(Reaper-->FileReaper) has remote Location (%s) removing from Data: %s", loc.ID, n.Id)
+			counter++ // increment counter
+		}
+		if counter >= conf.MIN_REPLICA_COUNT {
+			err = n.deleteFiles() // delete all data files for node in PATH_DATA NOTE: this is different from PATH_CACHE
+			if err != nil {
+				logger.Errorf("(Reaper-->FileReaper) files for node %s could not be deleted (Err: %s) ", n.Id, err.Error())
+				continue
+			}
+			deleted = true
+			return
+		}
+	}
+	return
+}
+
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+//  ************************ ************************ ************************ ************************ ************************ ************************ ************************ ************************
+// DeleteIndex for node
 func (node *Node) DeleteIndex(indextype string) (err error) {
 	// lock node
 	err = locker.NodeLockMgr.LockNode(node.Id)
@@ -398,4 +592,105 @@ func (node *Node) UpdateLinkages(ltype string, ids string, operation string) {
 	}
 	link.Operation = operation
 	node.Linkages = append(node.Linkages, link)
+}
+
+// AddLocation _
+func (node *Node) AddLocation(loc Location) (err error) {
+	if node.Locations == nil {
+		node.Locations = []Location{loc}
+		return
+	}
+
+	for _, location := range node.Locations {
+		if location.ID == loc.ID {
+			err = fmt.Errorf("%s already exists", loc.ID)
+			return
+		}
+	}
+
+	node.Locations = append(node.Locations, loc)
+	return
+}
+
+// GetLocations _
+func (node *Node) GetLocations() (locations []Location) {
+
+	locations = node.Locations
+	if locations == nil {
+		locations = []Location{}
+	}
+
+	return
+}
+
+// GetLocation _
+func (node *Node) GetLocation(locID string) (myLocation Location, err error) {
+	if node.Locations == nil {
+		err = fmt.Errorf("location %s not found", locID)
+		return
+	}
+
+	for _, location := range node.Locations {
+		if location.ID == locID {
+			myLocation = location
+			return
+		}
+
+	}
+
+	err = fmt.Errorf("location %s not found", locID)
+
+	return
+}
+
+// DeleteLocation _
+func (node *Node) DeleteLocation(locID string) (err error) {
+	if node.Locations == nil {
+		err = fmt.Errorf("location %s not found", locID)
+		return
+	}
+
+	newLocations := []Location{}
+	found := false
+	for _, location := range node.Locations {
+		if location.ID == locID {
+			found = true
+			continue
+		}
+		newLocations = append(newLocations, location)
+	}
+
+	if !found {
+		err = fmt.Errorf("location %s not found", locID)
+		return
+	}
+	node.Locations = newLocations
+	return
+}
+
+// DeleteLocations _
+func (node *Node) DeleteLocations() (err error) {
+	node.Locations = []Location{}
+	return
+}
+
+// GetRestore return true if node has been marked for restoring from external Location
+func (node *Node) GetRestore() (stat bool) {
+
+	stat = node.Restore
+
+	return
+}
+
+// SetRestore set Restore value to true to mark node for restoring from external Location
+func (node *Node) SetRestore() {
+	node.Restore = true
+	return
+}
+
+// UnsetRestore set Restore value to false, node restore has been requested e.g. via TSM client
+func (node *Node) UnSetRestore() {
+
+	node.Restore = false
+	return
 }

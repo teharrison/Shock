@@ -5,6 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/MG-RAST/Shock/shock-server/conf"
 	e "github.com/MG-RAST/Shock/shock-server/errors"
 	"github.com/MG-RAST/Shock/shock-server/node/archive"
@@ -12,15 +19,9 @@ import (
 	"github.com/MG-RAST/Shock/shock-server/node/locker"
 	"github.com/MG-RAST/Shock/shock-server/util"
 	"gopkg.in/mgo.v2/bson"
-	"io/ioutil"
-	"os"
-	"sort"
-	"strconv"
-	"strings"
-	"time"
 )
 
-//Modification functions
+//Update has node Modification functions
 func (node *Node) Update(params map[string]string, files file.FormFiles, hasLock bool) (err error) {
 	// Exclusive conditions
 	// 1.1. has files[upload] (regular upload)
@@ -98,8 +99,9 @@ func (node *Node) Update(params map[string]string, files file.FormFiles, hasLock
 		err = errors.New("parts parameter incompatible with type, path, copy_data and/or parent_node parameter(s)")
 	} else if isVirtualNode && (isPathUpload || isCopyUpload || isSubsetUpload) {
 		err = errors.New("type parameter incompatible with path, copy_data and/or parent_node parameter")
-	} else if isPathUpload && (isCopyUpload || isSubsetUpload) {
-		err = errors.New("path parameter incompatible with copy_data and/or parent_node parameter")
+	} else if isPathUpload && isSubsetUpload { // (isCopyUpload || isSubsetUpload) {
+		//err = errors.New("path parameter incompatible with copy_data and/or parent_node parameter")
+		err = errors.New("path parameter incompatible with isSubsetUpload parameter")
 	} else if isCopyUpload && isSubsetUpload {
 		err = errors.New("copy_data parameter incompatible with parent_node parameter")
 	} else if hasPartsFile && (isRegularUpload || isUrlUpload) {
@@ -196,24 +198,29 @@ func (node *Node) Update(params map[string]string, files file.FormFiles, hasLock
 		}
 		localpaths := strings.Split(conf.PATH_LOCAL, ",")
 		if len(localpaths) <= 0 {
-			err = errors.New("local files path uploads must be configured. Please contact your Shock administrator.")
+			err = errors.New("local files path uploads must be configured. Please contact your Shock administrator")
 			return
 		}
-		var success = false
+
+		legalPath := false
 		for _, p := range localpaths {
 			if strings.HasPrefix(params["path"], p) {
-				if err = node.SetFileFromPath(params["path"], params["action"]); err != nil {
-					err = fmt.Errorf("(node.SetFileFromPath) %s", err.Error())
-					return
-				} else {
-					success = true
-				}
+				legalPath = true
+				break
 			}
 		}
-		if !success {
-			err = errors.New("file not in local files path. Please contact your Shock administrator.")
+
+		if !legalPath {
+			err = errors.New("file not in local files path. Please contact your Shock administrator")
 			return
 		}
+
+		err = node.SetFileFromPath(params["path"], params["action"])
+		if err != nil {
+			err = fmt.Errorf("(node.SetFileFromPath) %s", err.Error())
+			return
+		}
+
 	} else if isCopyUpload {
 		var n *Node
 		n, err = Load(params["copy_data"])
@@ -501,7 +508,7 @@ func (node *Node) Save() (err error) {
 	node.UpdateVersion()
 	// only add to revisions if not new and has changed and allow revisions
 	if (previousVersion != "") && (previousVersion != node.Version) && (conf.MAX_REVISIONS != 0) {
-		n := Node{node.Id, node.Version, node.File, node.Attributes, node.Indexes, node.Acl, node.VersionParts, node.Tags, nil, node.Linkages, node.Priority, node.CreatedOn, node.LastModified, node.Expiration, node.Type, node.Subset, node.Parts}
+		n := Node{node.Id, node.Version, node.File, node.Attributes, node.Indexes, node.Acl, node.VersionParts, node.Tags, nil, node.Linkages, node.Priority, node.CreatedOn, node.LastModified, node.Expiration, node.Type, node.Subset, node.Parts, node.Locations, node.Restore}
 		newRevisions := []Node{n}
 		if len(node.Revisions) > 0 {
 			newRevisions = append(newRevisions, node.Revisions...) // prepend, latest revisions in front

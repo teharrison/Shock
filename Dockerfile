@@ -7,9 +7,21 @@
 # This allows the shock-server to bind to port 80 if desired.
 #setcap 'cap_net_bind_service=+ep' bin/shock-server
 
-FROM golang:1.7.6-alpine
+FROM golang:alpine
 
-RUN apk update && apk add git curl
+ENV PYTHONUNBUFFERED=1
+
+RUN apk update && apk add git curl &&\
+    echo "**** install Python ****" && \
+    apk add --no-cache python3 && \
+    if [ ! -e /usr/bin/python ]; then ln -sf python3 /usr/bin/python ; fi && \
+    \
+    echo "**** install pip ****" && \
+    python3 -m ensurepip && \
+    rm -r /usr/lib/python*/ensurepip && \
+    pip3 install --no-cache --upgrade pip setuptools wheel && \
+    if [ ! -e /usr/bin/pip ]; then ln -s pip3 /usr/bin/pip ; fi &&\
+    pip3 install boto3
 
 ENV DIR=/go/src/github.com/MG-RAST/Shock
 WORKDIR /go/bin
@@ -19,14 +31,14 @@ COPY . /go/src/github.com/MG-RAST/Shock
 RUN mkdir -p /var/log/shock /usr/local/shock/data ${DIR}
 
 # set version
-RUN cd ${DIR} && \
-  VERSION=$(cat VERSION) && \
-  sed -i "s/\[% VERSION %\]/${VERSION}/" shock-server/conf/conf.go
+#RUN cd ${DIR} && \
+#  VERSION=$(cat VERSION) && \
+#  sed -i "s/\[% VERSION %\]/${VERSION}/" shock-server/conf/conf.go
 
 # compile
 RUN cd ${DIR} && \
-    go get -d ./shock-server/ ./shock-client/  && \
-    CGO_ENABLED=0 go install -a -installsuffix cgo -v ./shock-server/ ./shock-client/
+     go get github.com/MG-RAST/go-shock-client  &&\
+     ./compile-server.sh
 
-# since this produces two binaries, we just specify (b)ash
-CMD ["/bin/ash"]
+
+CMD ["/go/bin/shock-server"]

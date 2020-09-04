@@ -23,18 +23,20 @@ You can get the Shock Dockerimage with:
 docker pull mgrast/shock
 ```
 
-Or, to build the Docker image on you own:
+Or, to build the Docker image on your own:
 ```bash
-export TAG=`date +"%Y%m%d.%H%M"`
 git clone --recursive https://github.com/MG-RAST/Shock.git
 cd Shock
-docker build --force-rm --no-cache --rm -t mgrast/shock:${TAG} .
+docker build --force-rm --no-cache --rm -t mgrast/shock .
 ```
 
 If you only need the statically compiled binary, you can extract it from the Dockerimage:
 ```bash
-docker create --name shock mgrast/shock:${TAG}
-docker cp shock:/go/bin/shock-server .
+VERSION=$(docker run --rm mgrast/shock shock-server --version | grep version | grep -o v[0-9].* |tr -d '\n')
+echo $VERSION
+docker create --name shock mgrast/shock
+mkdir -p bin
+docker cp shock:/go/bin/shock-server ./bin/shock-server-${VERSION}
 docker rm shock
 ```
 
@@ -88,4 +90,9 @@ port 7445: Shock server API (default in config)<br>
 
 Documentation
 -------------
-For further information about Shock's functionality, please refer to our [github wiki](https://github.com/MG-RAST/Shock/wiki/_pages).
+For further information about Shock's functionality, please refer to our [github](https://github.com/MG-RAST/Shock/).
+
+Developer Notes
+---------------
+
+To update vendor directory use the tool govendor: `go get -u github.com/kardianos/govendor`

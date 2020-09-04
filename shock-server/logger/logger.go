@@ -3,6 +3,7 @@ package logger
 
 import (
 	"fmt"
+
 	"github.com/MG-RAST/Shock/shock-server/conf"
 	l4g "github.com/MG-RAST/golib/log4go"
 
@@ -27,6 +28,11 @@ type Logger struct {
 func Initialize() {
 	Log = New()
 	go Log.Handle()
+}
+
+func Debug(level int, format string, a ...interface{}) {
+	Log.Debug(level, format, a...)
+	return
 }
 
 // Info is a short cut function that uses package initialized logger
@@ -138,8 +144,14 @@ func (l *Logger) Log(log string, lvl l4g.Level, message string) {
 	return
 }
 
-func (l *Logger) Debug(log string, message string) {
-	l.Log(log, l4g.DEBUG, message)
+// func (l *Logger) Debug(log string, message string) {
+// 	l.Log(log, l4g.DEBUG, message)
+// 	return
+// }
+func (l *Logger) Debug(level int, format string, a ...interface{}) {
+	if level <= conf.DEBUG_LEVEL {
+		l.Log("debug", l4g.DEBUG, fmt.Sprintf(format, a...))
+	}
 	return
 }
 
